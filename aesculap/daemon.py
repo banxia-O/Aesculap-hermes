@@ -56,6 +56,7 @@ class Daemon:
             recheck_seconds=config.debounce.recheck_seconds,
         )
         self.pipeline = None
+        self.remediation = None
         if on_confirmed is not None:
             self.on_confirmed = on_confirmed
         else:
@@ -90,7 +91,8 @@ class Daemon:
         return f"{base.rstrip('/')}/aesculap.lock"
 
     def _maybe_build_pipeline(self):
-        """Build the triage->gate pipeline if a triage provider is configured.
+        """Build the triage->gate pipeline + remediation executor if a triage
+        provider is configured.
 
         Kept import-local so the daemon (and Phase 2 tests) don't require any
         provider SDK unless triage is actually configured.
@@ -98,18 +100,62 @@ class Daemon:
         if not self.config.triage.provider:
             return None
         from aesculap.gate.blast_radius import BlastRadiusGate
+        from aesculap.gate.escalation import EscalationLadder
         from aesculap.gate.scope import ScopeGate
         from aesculap.gate.tripwires import TripwireGate
         from aesculap.install.capabilities import detect_capabilities
         from aesculap.llm.providers import provider_from_triage
         from aesculap.pipeline import Pipeline
+        from aesculap.remediate.backup import FileBackupManager, GitBackupManager
+        from aesculap.remediate.coding_agent import CodingAgentExecutor
+        from aesculap.remediate.executor import RemediationExecutor
+        from aesculap.remediate.selffix import SelfFixExecutor
+        from aesculap.remediate.verify import Verifier
         from aesculap.triage.triager import Triager
 
         caps = detect_capabilities(self.config)
         scope = ScopeGate(self.config.scope, self.config.aesculap_home)
         gate = BlastRadiusGate(TripwireGate(scope), caps.coding_agent_available)
         triager = Triager(provider_from_triage(self.config.triage))
+
+        state_dir = self.config.state_dir or "/tmp"
+        verifier = Verifier(self.suite)
+        ladder = EscalationLadder(
+            retry_budget=self.config.selffix.retry_budget,
+            coding_agent_available=caps.coding_agent_available,
+        )
+        selffix = SelfFixExecutor(
+            verifier,
+            FileBackupManager(f"{state_dir.rstrip('/')}/backups"),
+            ladder,
+            observe_window_seconds=self.config.selffix.observe_window_seconds,
+        )
+        coding_agent = None
+        if caps.coding_agent_available:
+            project = self.config.scope.project_root or "."
+            coding_agent = CodingAgentExecutor(
+                tool=caps.coding_agents[0],
+                verifier=verifier,
+                git=GitBackupManager(project),
+                command_template=self.config.coding_agent.command_template,
+            )
+        self.remediation = RemediationExecutor(
+            mode=self.config.mode,
+            audit=self.audit,
+            selffix=selffix,
+            coding_agent=coding_agent,
+            ladder=ladder,
+            notify_fn=self._notify_hook,
+        )
         return Pipeline(self.suite, triager, gate, self.audit)
+
+    def _notify_hook(self, outcome, reason) -> None:
+        """Placeholder notify hook (Phase 5 replaces with the real notifier)."""
+        self.audit.record(
+            "notify_human_pending",
+            fingerprint=outcome.event.fingerprint,
+            reason=reason,
+        )
 
     # --- event handling ---------------------------------------------------
     def _default_confirmed(self, event: DetectionEvent) -> None:
@@ -123,13 +169,15 @@ class Daemon:
         )
 
     def _pipeline_confirmed(self, event: DetectionEvent) -> None:
-        """Run the confirmed fault through triage -> code gate (PRD §5/§6).
+        """Run the confirmed fault through triage -> gate -> remediation.
 
-        Phase 3 stops at the gate decision (recorded in the audit log). Acting
-        on the decision is Phase 4 and is additionally gated on `mode == fix`.
+        Triage proposes (§5); the code gate decides (§6); remediation executes
+        the approved route, gated on `mode == fix` (§10.2). Every step is
+        audited (§13).
         """
         assert self.pipeline is not None
-        self.pipeline.process(event)
+        outcome = self.pipeline.process(event)
+        self.remediation.remediate(outcome)
 
     def handle_event(self, event: DetectionEvent) -> bool:
         """Run one event through de-bounce; dispatch if confirmed.
