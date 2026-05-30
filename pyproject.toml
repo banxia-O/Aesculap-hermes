@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aesculap"
+version = "0.1.0"
+description = "Self-healing plugin for Hermes agents: detect failures, auto-fix within safe boundaries, escalate to coding tools or a human when needed."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# Provider SDKs are optional; the engine is provider-agnostic and only needs
+# the SDK for the provider(s) actually configured at install time.
+openai = ["openai>=1.0"]
+anthropic = ["anthropic>=0.40"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+aesculap = "aesculap.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["aesculap*"]
+
+[tool.setuptools.package-data]
+aesculap = ["resources/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
