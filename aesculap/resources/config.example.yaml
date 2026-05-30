@@ -1,0 +1,103 @@
+# Aesculap configuration (example / placeholder values only).
+# Generated/edited by the install wizard. Copy and adapt; nothing here is a
+# real deployment value (PRD §14: repo contains no real IP/domain/credentials).
+
+# --- Master switch (PRD §10.1) -------------------------------------------
+enabled: true
+
+# --- Mode bit (PRD §10.2) ------------------------------------------------
+#   fix     : detect + auto-fix + escalate when needed (default, PRD intent)
+#   observe : detect + report only, never acts (safety downgrade)
+mode: fix
+
+# Aesculap's own directory and state — hard-blacklisted (§9.3); never written
+# by a fix.
+aesculap_home: /opt/aesculap
+state_dir: /var/lib/aesculap
+audit_log_path: /var/lib/aesculap/audit.jsonl
+
+# --- Writable scope + blacklist (PRD §9) ---------------------------------
+# tier is REQUIRED and has NO default — the installer forces an explicit choice.
+#   A : project tree only            (risk: ⭐, recommended)
+#   B : Hermes config dir + project  (risk: ⭐⭐⭐)
+#   C : whole host                   (risk: ⭐⭐⭐⭐⭐ ⚠ — only on dedicated hosts)
+scope:
+  tier: A
+  project_root: /home/hermes/project
+  hermes_config_dir: /home/hermes/.hermes
+  # Identity files to blacklist (decision #1: installer scans the Hermes config
+  # dir and the user ticks persona/memory files). Hard read-only; need-to-edit
+  # always goes to a human (§9.2).
+  identity_files:
+    - /home/hermes/.hermes/SOUL.md
+    - /home/hermes/.hermes/MEMORY.md
+    - /home/hermes/.hermes/USER.md
+  # Extra user blacklist globs, merged ON TOP of the hard-wired floor.
+  extra_blacklist: []
+
+# --- Trigger architecture (PRD §2) ---------------------------------------
+detectors:
+  # Requires Hermes file logging (PRD §2 precondition). The installer guides
+  # the user to enable it; suggested default path: ~/.hermes/logs/hermes.log
+  log_paths:
+    - /home/hermes/.hermes/logs/hermes.log
+  error_patterns:
+    - "Traceback"
+    - "CRITICAL"
+    - "\\bERROR\\b"
+  liveness_interval_seconds: 120     # 1-5 min range
+  full_checkup_interval_seconds: 86400  # 24h
+
+# --- De-bounce / escalation gate (PRD §4) --------------------------------
+debounce:
+  recheck_seconds: 60
+  consecutive_threshold: 2
+
+# --- Tier 0 probes (PRD §3) — deterministic, never call an LLM -----------
+probes:
+  - name: hermes-process-alive
+    type: process_alive
+    params:
+      pattern: "hermes"
+  - name: log-error-burst
+    type: log_error_count
+    params:
+      path: /home/hermes/.hermes/logs/hermes.log
+      lines: 200
+      patterns: ["Traceback", "CRITICAL"]
+      fail_threshold: 1
+  - name: disk-space
+    type: disk_free
+    params:
+      path: /
+      warn_percent: 90
+      fail_percent: 97
+
+# --- Tier 1 triage model (PRD §5.1) — prefer a strong model --------------
+triage:
+  provider: anthropic          # openai | anthropic | openai_compatible
+  model: PLACEHOLDER-strong-model
+  base_url: ""                 # only for openai_compatible (vLLM/Ollama/etc.)
+  api_key_env: ANTHROPIC_API_KEY   # env var NAME; never the key itself
+
+# --- Tier 2 self-fix model (PRD §5.1: may use a cheaper model) -----------
+selffix:
+  provider: openai
+  model: PLACEHOLDER-cheap-model
+  base_url: ""
+  api_key_env: OPENAI_API_KEY
+  retry_budget: 3              # PRD §7.2: at most 3 self_fix attempts/bug
+  observe_window_seconds: 60   # PRD §7.1 step 4: observation window
+
+# --- coding_agent route (PRD §6.1, §6.4) ---------------------------------
+# If `tool` is empty / not installed, this route auto-degrades to human (§6.4).
+coding_agent:
+  tool: ""                     # claude | codex | ""
+  command_template: ""         # e.g. claude -p {prompt} --output-format json
+
+# --- Notification channel (PRD §8.3, §11) --------------------------------
+# Provider-agnostic: a command template. {message} is substituted with the
+# notification body. Reuses Hermes' existing messaging gateway.
+notify:
+  command_template: "hermes gateway send --text {message}"
+  cooldown_seconds: 3600
