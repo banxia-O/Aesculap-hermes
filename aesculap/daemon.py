@@ -57,6 +57,7 @@ class Daemon:
         )
         self.pipeline = None
         self.remediation = None
+        self.notifier = None
         if on_confirmed is not None:
             self.on_confirmed = on_confirmed
         else:
@@ -111,6 +112,8 @@ class Daemon:
         from aesculap.remediate.executor import RemediationExecutor
         from aesculap.remediate.selffix import SelfFixExecutor
         from aesculap.remediate.verify import Verifier
+        from aesculap.notify.dedup import NotificationDeduper
+        from aesculap.notify.notifier import Notifier
         from aesculap.triage.triager import Triager
 
         caps = detect_capabilities(self.config)
@@ -139,6 +142,17 @@ class Daemon:
                 git=GitBackupManager(project),
                 command_template=self.config.coding_agent.command_template,
             )
+        # Notifier (§8.3, §11): only built if a channel is configured; the
+        # deduper suppresses re-spam of pending issues (§12).
+        self.notifier = None
+        if self.config.notify.command_template:
+            self.notifier = Notifier(
+                self.config.notify.command_template,
+                deduper=NotificationDeduper(
+                    f"{state_dir.rstrip('/')}/open_issues.json",
+                    cooldown_seconds=self.config.notify.cooldown_seconds,
+                ),
+            )
         self.remediation = RemediationExecutor(
             mode=self.config.mode,
             audit=self.audit,
@@ -150,11 +164,37 @@ class Daemon:
         return Pipeline(self.suite, triager, gate, self.audit)
 
     def _notify_hook(self, outcome, reason) -> None:
-        """Placeholder notify hook (Phase 5 replaces with the real notifier)."""
+        """Send the actionable human notification (§8.3) via the gateway.
+
+        Builds the four-part message from the outcome and routes it through the
+        notifier (de-dup + cooldown + key-safety). If no channel is configured,
+        records the pending escalation for audit instead of sending.
+        """
+        from aesculap.notify.message import build_message
+
+        event = outcome.event
+        triage = outcome.triage
+        if self.notifier is None:
+            self.audit.record(
+                "notify_human_pending", fingerprint=event.fingerprint,
+                reason=reason,
+            )
+            return
+        triggering_probe = (
+            event.related_probes[0] if event.related_probes else ""
+        )
+        message = build_message(
+            fault_summary=event.summary,
+            triggering_probe=triggering_probe,
+            evidence=event.evidence,
+            diagnosis=triage.diagnosis,
+            attempts=[reason] if reason else [],
+            needs_human_reason=outcome.gate.needs_human_reason,
+        )
+        result = self.notifier.notify(event.fingerprint, message)
         self.audit.record(
-            "notify_human_pending",
-            fingerprint=outcome.event.fingerprint,
-            reason=reason,
+            "notify_human", fingerprint=event.fingerprint,
+            sent=result.sent, suppressed=result.suppressed, reason=result.reason,
         )
 
     # --- event handling ---------------------------------------------------
