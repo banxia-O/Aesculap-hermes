@@ -6,9 +6,10 @@ Wires the trigger architecture together:
 - consumes events and runs them through de-bounce (PRD §4)
 - a confirmed (persistent) fault is handed to the `on_confirmed` callback
 
-Phase 2 stops at "confirmed fault ready for Tier 1". The triage layer (Phase 3)
-and remediation (Phase 4) plug into `on_confirmed`. Tier 1+ work is guarded by
-the concurrency lock (PRD §12) so a long-running coding_agent run can't be
+When a triage provider is configured, the daemon builds a Pipeline (Phase 3:
+triage -> code gate, PRD §5/§6) and uses it as the confirmed-fault handler.
+Remediation (Phase 4) plugs in after the gate. Tier 1+ work is guarded by the
+concurrency lock (PRD §12) so a long-running coding_agent run can't be
 double-triggered.
 
 systemd manages the process lifecycle (PRD §2): if the daemon crashes, systemd
@@ -54,7 +55,16 @@ class Daemon:
             consecutive_threshold=config.debounce.consecutive_threshold,
             recheck_seconds=config.debounce.recheck_seconds,
         )
-        self.on_confirmed = on_confirmed or self._default_confirmed
+        self.pipeline = None
+        if on_confirmed is not None:
+            self.on_confirmed = on_confirmed
+        else:
+            self.pipeline = self._maybe_build_pipeline()
+            self.on_confirmed = (
+                self._pipeline_confirmed
+                if self.pipeline is not None
+                else self._default_confirmed
+            )
         self._stop = threading.Event()
         self._lock = FileLock(self._lock_path())
 
@@ -79,9 +89,31 @@ class Daemon:
         base = self.config.state_dir or "/tmp"
         return f"{base.rstrip('/')}/aesculap.lock"
 
+    def _maybe_build_pipeline(self):
+        """Build the triage->gate pipeline if a triage provider is configured.
+
+        Kept import-local so the daemon (and Phase 2 tests) don't require any
+        provider SDK unless triage is actually configured.
+        """
+        if not self.config.triage.provider:
+            return None
+        from aesculap.gate.blast_radius import BlastRadiusGate
+        from aesculap.gate.scope import ScopeGate
+        from aesculap.gate.tripwires import TripwireGate
+        from aesculap.install.capabilities import detect_capabilities
+        from aesculap.llm.providers import provider_from_triage
+        from aesculap.pipeline import Pipeline
+        from aesculap.triage.triager import Triager
+
+        caps = detect_capabilities(self.config)
+        scope = ScopeGate(self.config.scope, self.config.aesculap_home)
+        gate = BlastRadiusGate(TripwireGate(scope), caps.coding_agent_available)
+        triager = Triager(provider_from_triage(self.config.triage))
+        return Pipeline(self.suite, triager, gate, self.audit)
+
     # --- event handling ---------------------------------------------------
     def _default_confirmed(self, event: DetectionEvent) -> None:
-        """Phase 2 default: record the confirmed fault; later phases triage it."""
+        """No triage configured: record the confirmed fault (audit-only)."""
         self.audit.record(
             "fault_confirmed",
             fingerprint=event.fingerprint,
@@ -89,6 +121,15 @@ class Daemon:
             summary=event.summary,
             evidence=event.evidence,
         )
+
+    def _pipeline_confirmed(self, event: DetectionEvent) -> None:
+        """Run the confirmed fault through triage -> code gate (PRD §5/§6).
+
+        Phase 3 stops at the gate decision (recorded in the audit log). Acting
+        on the decision is Phase 4 and is additionally gated on `mode == fix`.
+        """
+        assert self.pipeline is not None
+        self.pipeline.process(event)
 
     def handle_event(self, event: DetectionEvent) -> bool:
         """Run one event through de-bounce; dispatch if confirmed.
