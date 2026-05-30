@@ -1,0 +1,18 @@
+[Unit]
+Description=Aesculap — Hermes self-healing daemon
+Documentation=https://github.com/banxia-O/Aesculap-hermes
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={exec_start}
+Restart=always
+RestartSec=5
+WorkingDirectory={working_directory}
+# Aesculap is restarted by systemd on crash (PRD §2, §9.3): it never restarts
+# itself. Keep it minimal-privilege.
+NoNewPrivileges=true
+
+[Install]
+WantedBy={wanted_by}
