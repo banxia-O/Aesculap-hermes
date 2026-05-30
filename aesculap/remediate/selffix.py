@@ -21,11 +21,14 @@ backup/verify/rollback/budget only.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from aesculap.gate.escalation import EscalationLadder, EscalationState
+from aesculap.gate.scope import ScopeGate
 from aesculap.remediate.backup import FileBackup, FileBackupManager
 from aesculap.remediate.verify import VerifyResult, Verifier
 from aesculap.probes.base import ProbeResult
@@ -47,15 +50,29 @@ RestartFn = Callable[[ProposedAction], subprocess.CompletedProcess]
 CommandFn = Callable[[ProposedAction], subprocess.CompletedProcess]
 
 
+# SECURITY: commands are executed with shell=False on an argv parsed by shlex —
+# never through a shell. The triage LLM proposes these commands, so they are
+# untrusted; running them through a shell would let `$(...)`, backticks, `$VAR`,
+# `;`, `|`, `&&`, redirects etc. expand and defeat the §8.1 tripwire scan (which
+# reasons about the *argv*). With shell=False those metacharacters are passed as
+# inert literal arguments, so command injection cannot execute. This is the
+# root-cause defense; the gate's metachar check (tripwires.py) is belt-and-braces.
+def _empty_proc(reason: str) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=reason)
+
+
 def _default_restart(action: ProposedAction) -> subprocess.CompletedProcess:
-    cmd = action.command or action.description
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+    argv = shlex.split(action.command or action.description or "")
+    if not argv:
+        return _empty_proc("empty restart command")
+    return subprocess.run(argv, capture_output=True, text=True, timeout=60)
 
 
 def _default_command(action: ProposedAction) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        action.command or "", shell=True, capture_output=True, text=True, timeout=120
-    )
+    argv = shlex.split(action.command or "")
+    if not argv:
+        return _empty_proc("empty command")
+    return subprocess.run(argv, capture_output=True, text=True, timeout=120)
 
 
 class SelfFixExecutor:
@@ -68,12 +85,16 @@ class SelfFixExecutor:
         command_fn: CommandFn | None = None,
         observe_window_seconds: float = 60,
         sleep_fn: Callable[[float], None] | None = None,
+        scope: ScopeGate | None = None,
     ):
         self.verifier = verifier
         self.backup_mgr = backup_mgr
         self.ladder = ladder
         self.restart_fn = restart_fn or _default_restart
         self.command_fn = command_fn or _default_command
+        # Optional defense-in-depth: re-check write targets against scope at
+        # execution time. The gate already vetted them before routing here.
+        self.scope = scope
         self.observe_window_seconds = observe_window_seconds
         # Injected so tests don't actually sleep through the observation window.
         import time as _time
@@ -85,12 +106,29 @@ class SelfFixExecutor:
         """Run actions; return (ok, reason, backups_for_rollback)."""
         backups: list[FileBackup] = []
         for action in actions:
-            if action.kind == ActionKind.WRITE_FILE and action.path:
+            # WRITE_FILE: write the provided content directly — no shell, no
+            # command. The path is backed up first and (defense-in-depth)
+            # re-checked against scope before we touch it.
+            if action.kind == ActionKind.WRITE_FILE:
+                if not action.path:
+                    return False, "write_file action without path", backups
+                if self.scope is not None:
+                    verdict = self.scope.check_write(action.path)
+                    if not verdict.allowed:
+                        return False, f"refused write: {verdict.reason}", backups
                 backups.append(self.backup_mgr.backup(action.path))
+                try:
+                    Path(action.path).write_text(action.content or "")
+                except OSError as e:
+                    return False, f"write failed: {e}", backups
+                continue
             try:
                 if action.kind == ActionKind.RESTART_PROCESS:
                     proc = self.restart_fn(action)
-                elif action.kind in (ActionKind.RUN_COMMAND, ActionKind.WRITE_FILE):
+                elif action.kind == ActionKind.RUN_COMMAND:
+                    # Reachable only if a caller bypasses the gate; the §6.2 gate
+                    # escalates any self_fix RUN_COMMAND off this path. Kept
+                    # shell-free for safety.
                     proc = self.command_fn(action)
                 else:
                     continue

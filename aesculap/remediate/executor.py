@@ -35,6 +35,15 @@ from aesculap.types import Route
 NotifyFn = Callable[[PipelineOutcome, str], None]
 
 
+def _action_summary(a) -> str:
+    """Readable one-liner for an action item (string or structured object)."""
+    if isinstance(a, dict):
+        kind = a.get("kind", "action")
+        target = a.get("path") or a.get("command") or a.get("target") or ""
+        return f"{kind}: {target}".rstrip(": ")
+    return str(a)
+
+
 @dataclass
 class RemediationResult:
     final_route: Route
@@ -137,7 +146,8 @@ class RemediationExecutor:
         if outcome.event.evidence:
             lines.append(f"Evidence:\n{outcome.event.evidence}")
         if t.actions:
-            lines.append("Suggested actions:\n- " + "\n- ".join(t.actions))
+            lines.append("Suggested actions:\n- "
+                         + "\n- ".join(_action_summary(a) for a in t.actions))
         lines.append("Make the smallest change that fixes the root cause. "
                      "Do not touch identity files, credentials, or .env.")
         return "\n".join(lines)

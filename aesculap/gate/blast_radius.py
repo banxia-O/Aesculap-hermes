@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from aesculap.gate.tripwires import TripwireGate
 from aesculap.types import (
+    ActionKind,
     BlastRadius,
     GateDecision,
     NeedsHumanReason,
@@ -77,9 +78,20 @@ class BlastRadiusGate:
         if proposed is Route.SELF_FIX:
             radius_forbidden = triage.blast_radius in _FORBIDDEN_FOR_SELF_FIX
             irreversible = not triage.reversible
-            if radius_forbidden or irreversible:
+            # An arbitrary shell command has, by construction, an unbounded and
+            # unknowable blast radius — the gate cannot statically prove what it
+            # touches. So self_fix may never run a RUN_COMMAND: file edits must
+            # arrive as scope-checked, shell-free write_file actions, and any
+            # command is escalated to the coding_agent (which runs inside a git
+            # checkpoint) or a human (§6.2). RESTART_PROCESS stays — it's the one
+            # bounded, reversible, idempotent operation self_fix is meant for.
+            has_command = any(a.kind is ActionKind.RUN_COMMAND for a in actions)
+            if has_command or radius_forbidden or irreversible:
                 target = self._escalation_target()
                 why = []
+                if has_command:
+                    why.append("self_fix may not run shell commands "
+                               "(unbounded blast radius)")
                 if radius_forbidden:
                     why.append(f"blast_radius={triage.blast_radius.value}")
                 if irreversible:

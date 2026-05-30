@@ -138,9 +138,11 @@ class ScopeGate:
         )
 
     def is_credential_file(self, p: Path) -> bool:
-        name = p.name
-        lname = name.lower()
-        if any(fnmatch.fnmatch(name, pat) for pat in _CREDENTIAL_NAME_PATTERNS):
+        # Match case-insensitively: fnmatch is case-sensitive on Linux, so we
+        # lowercase the name (patterns are already lowercase) — otherwise `.ENV`,
+        # `ID_RSA`, `Credentials`, `key.PEM` would slip past the §9.2 floor.
+        lname = p.name.lower()
+        if any(fnmatch.fnmatch(lname, pat) for pat in _CREDENTIAL_NAME_PATTERNS):
             return True
         return any(s in lname for s in _CREDENTIAL_NAME_SUBSTRINGS)
 
@@ -181,6 +183,14 @@ class ScopeGate:
         return None
 
     # --- public API -------------------------------------------------------
+    def blacklist_floor(self, path: str | os.PathLike[str]) -> str | None:
+        """Return the §9.2 blacklist reason for `path`, ignoring the tier
+        boundary. Used to vet command path-arguments: a command must never name
+        a blacklisted path (identity/credential/system-sensitive/self-dir) even
+        if its working directory would otherwise be in scope.
+        """
+        return self.blacklist_reason(_norm(path))
+
     def check_write(self, path: str | os.PathLike[str]) -> ScopeVerdict:
         """Adjudicate a write to `path`. Blacklist floor wins over tier."""
         p = _norm(path)

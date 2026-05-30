@@ -132,6 +132,7 @@ class Daemon:
             FileBackupManager(f"{state_dir.rstrip('/')}/backups"),
             ladder,
             observe_window_seconds=self.config.selffix.observe_window_seconds,
+            scope=scope,
         )
         coding_agent = None
         if caps.coding_agent_available:

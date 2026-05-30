@@ -32,6 +32,50 @@ def test_valid_parses():
     assert out.decision.actions == ["systemctl restart hermes"]
 
 
+def test_structured_write_file_action_parses():
+    out = parse_triage(valid_json(actions=[
+        {"kind": "write_file", "path": "/p/app.cfg", "content": "k: v\n"},
+    ]))
+    assert not out.degraded
+    assert out.decision.actions == [
+        {"kind": "write_file", "path": "/p/app.cfg", "content": "k: v\n"}
+    ]
+
+
+def test_mixed_string_and_structured_actions():
+    out = parse_triage(valid_json(actions=[
+        "restart hermes",
+        {"kind": "write_file", "path": "/p/x", "content": "y"},
+    ]))
+    assert not out.degraded
+    assert out.decision.actions[0] == "restart hermes"
+    assert out.decision.actions[1]["kind"] == "write_file"
+
+
+def test_write_file_missing_content_degrades():
+    out = parse_triage(valid_json(actions=[{"kind": "write_file", "path": "/p/x"}]))
+    assert out.degraded
+    assert out.decision.route is Route.HUMAN
+
+
+def test_write_file_missing_path_degrades():
+    out = parse_triage(valid_json(actions=[{"kind": "write_file", "content": "y"}]))
+    assert out.degraded
+    assert out.decision.route is Route.HUMAN
+
+
+def test_unknown_structured_action_kind_degrades():
+    out = parse_triage(valid_json(actions=[{"kind": "deploy", "target": "prod"}]))
+    assert out.degraded
+    assert out.decision.route is Route.HUMAN
+
+
+def test_non_string_non_dict_action_degrades():
+    out = parse_triage(valid_json(actions=[123]))
+    assert out.degraded
+    assert out.decision.route is Route.HUMAN
+
+
 def test_unparseable_degrades_to_human():
     out = parse_triage("this is not json at all")
     assert out.degraded
