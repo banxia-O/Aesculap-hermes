@@ -21,6 +21,7 @@ backup/verify/rollback/budget only.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from typing import Callable
@@ -47,15 +48,29 @@ RestartFn = Callable[[ProposedAction], subprocess.CompletedProcess]
 CommandFn = Callable[[ProposedAction], subprocess.CompletedProcess]
 
 
+# SECURITY: commands are executed with shell=False on an argv parsed by shlex —
+# never through a shell. The triage LLM proposes these commands, so they are
+# untrusted; running them through a shell would let `$(...)`, backticks, `$VAR`,
+# `;`, `|`, `&&`, redirects etc. expand and defeat the §8.1 tripwire scan (which
+# reasons about the *argv*). With shell=False those metacharacters are passed as
+# inert literal arguments, so command injection cannot execute. This is the
+# root-cause defense; the gate's metachar check (tripwires.py) is belt-and-braces.
+def _empty_proc(reason: str) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=reason)
+
+
 def _default_restart(action: ProposedAction) -> subprocess.CompletedProcess:
-    cmd = action.command or action.description
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+    argv = shlex.split(action.command or action.description or "")
+    if not argv:
+        return _empty_proc("empty restart command")
+    return subprocess.run(argv, capture_output=True, text=True, timeout=60)
 
 
 def _default_command(action: ProposedAction) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        action.command or "", shell=True, capture_output=True, text=True, timeout=120
-    )
+    argv = shlex.split(action.command or "")
+    if not argv:
+        return _empty_proc("empty command")
+    return subprocess.run(argv, capture_output=True, text=True, timeout=120)
 
 
 class SelfFixExecutor:

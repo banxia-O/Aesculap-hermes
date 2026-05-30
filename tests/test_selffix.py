@@ -115,6 +115,26 @@ def test_budget_exhaustion_escalates(tmp_path):
     assert result.next_route is Route.CODING_AGENT  # budget 1 exhausted
 
 
+def test_default_command_does_not_invoke_shell(tmp_path):
+    """SECURITY: _default_command must run with shell=False so that shell
+    metacharacters stay inert literals and command substitution cannot execute."""
+    from aesculap.remediate.selffix import _default_command
+
+    action = ProposedAction(kind=ActionKind.RUN_COMMAND,
+                            command="echo $(echo INJECTED)")
+    proc = _default_command(action)
+    # Under shell=True this would expand to "INJECTED"; under shell=False the
+    # `echo` binary prints the substitution syntax verbatim.
+    assert proc.stdout.strip() == "$(echo INJECTED)"
+
+
+def test_default_command_empty_is_safe(tmp_path):
+    from aesculap.remediate.selffix import _default_command
+
+    proc = _default_command(ProposedAction(kind=ActionKind.RUN_COMMAND, command=""))
+    assert proc.returncode == 1  # no crash on empty argv
+
+
 def test_file_backup_restored_on_verify_failure(tmp_path):
     conf = tmp_path / "c.json"
     conf.write_text("orig")

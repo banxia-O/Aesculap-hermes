@@ -33,6 +33,15 @@ from aesculap.types import ActionKind, ProposedAction
 # path containing "rm".
 _FORBIDDEN_COMMANDS = {"rm", "rmdir", "shred", "mkfs", "dd"}
 
+# Shell metacharacters that enable command substitution, variable expansion,
+# command chaining, sub-shells, or redirection. argv-token matching cannot reason
+# about a command that uses any of these (e.g. `$(echo rm)`, `` `rm` ``, `$RM`,
+# `a; rm -rf /`, `x | sh`, `echo > /etc/passwd`), so such a command is forced to
+# `human` outright (§8.1). The executor additionally runs commands with
+# shell=False so these would not expand even if they slipped through — this gate
+# check is the first, declarative line of defense.
+_SHELL_METACHARS = ("$", "`", ";", "|", "&", ">", "<", "(", ")", "{", "}", "\n")
+
 # Regexes for dangerous command *shapes* that argv-token matching misses.
 _FORCE_PUSH_RE = re.compile(r"\bgit\b.*\bpush\b.*(--force\b|--force-with-lease\b|-f\b)")
 _DANGEROUS_SHAPES = (
@@ -79,6 +88,11 @@ def _check_command(command: str) -> str | None:
     """Return a tripwire reason if a shell command is forbidden, else None."""
     if not command:
         return None
+    # Shell-expansion / chaining metacharacters: argv parsing can't see through
+    # them, so refuse the command outright rather than risk a bypass (§8.1).
+    for ch in _SHELL_METACHARS:
+        if ch in command:
+            return f"tripwire: shell metacharacter {ch!r} in command (§8.1)"
     argv = _command_argv(command)
     # Bare executable name (strip any path) against the forbidden set.
     for tok in argv:
