@@ -140,7 +140,28 @@ python -m aesculap install-systemd ./config.yaml --scope user --write   # 真正
 
 这是你（和人类）最该弄清的部分。**边界由代码强制，不是靠你自觉。**
 
-### ✅ 它**能**改的
+### ✅ 它**能**改的——按修复档位分
+
+#### 🔧 self_fix（自修，第一档）
+**只允许两类动作**，其余一律强制升级（`gate/blast_radius.py` 执行，LLM 建议无效）：
+
+| 动作 | 实现方式 | 说明 |
+|------|---------|------|
+| `write_file` | `Path.write_text(content)`，**不经过 shell** | 分诊模型在 JSON 里直接给出文件新内容；改前备份，验证失败自动回滚 |
+| `restart_process` | `subprocess.run(argv, shell=False)` | 重启指定进程；命令经过 tripwire 扫描后才执行 |
+
+**self_fix 绝对不能运行任意 shell 命令（§6.2）。** 任意命令（`RUN_COMMAND`）的爆炸半径本质未知——
+即使命令看起来无害，只要 LLM 在 self_fix 路由下提议 `RUN_COMMAND`，`blast_radius.py`
+就会强制升级为 `coding_agent` 或 `human`，`confidence` 再高也拦不住。
+
+#### 🤖 coding_agent（外部工具，第二档）
+调 Claude Code CLI（`claude -p`）或 Codex CLI，在 git 仓库内操作。
+它可以运行命令、修改多个文件，但改动落 git commit，失败 `git reset` 回滚。
+
+#### 📢 human（通知人类，第三档）
+任何 coding_agent 失败或不可用时，通知你（四件套：哪坏了 / 试过什么 / 要你做什么 / 一行指引）。
+
+### ✅ 可以改的文件范围
 
 - 在人类所选**权限档边界内**（A=项目目录 / B=+配置目录 / C=整机）的、**不在黑名单里**的文件。
 - 默认放行（default-allow）：边界内除黑名单外都可改。
