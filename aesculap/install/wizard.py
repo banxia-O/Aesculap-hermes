@@ -116,12 +116,45 @@ def write_config(ans: WizardAnswers, path: str) -> Config:
     return load_config(path)
 
 
+# Ephemeral / bulky Hermes runtime dirs that must NOT be tracked: a naive
+# `git init` on ~/.hermes/ would otherwise drag gigabytes of session logs and
+# image cache into the repo and make `git reset` rollback noisy. We only want
+# rollback-able assets (config, skills, scripts) under version control.
+_GITIGNORE_MARK_BEGIN = "# >>> aesculap (do not edit this block) >>>"
+_GITIGNORE_MARK_END = "# <<< aesculap <<<"
+_GITIGNORE_EXCLUDES = [
+    "logs/",
+    "sessions/",
+    "cron/output/",
+    "image_cache/",
+]
+
+
+def ensure_gitignore(project_root: str) -> None:
+    """Idempotently add an Aesculap-managed block excluding ephemeral Hermes
+    dirs (logs/sessions/cron output/image cache) so rollback only touches
+    config-like assets, never gigabytes of runtime data."""
+    gi = Path(project_root).expanduser() / ".gitignore"
+    block = "\n".join(
+        [_GITIGNORE_MARK_BEGIN, *_GITIGNORE_EXCLUDES, _GITIGNORE_MARK_END]
+    )
+    existing = gi.read_text() if gi.exists() else ""
+    if _GITIGNORE_MARK_BEGIN in existing:
+        return  # already managed; leave the user's file alone
+    sep = "" if not existing or existing.endswith("\n") else "\n"
+    gi.write_text(f"{existing}{sep}{block}\n")
+
+
 def git_init(project_root: str) -> bool:
-    """Initialize a git repo at project_root (PRD §7.1 precondition)."""
+    """Initialize a git repo at project_root (PRD §7.1 precondition) and seed a
+    .gitignore that keeps bulky/ephemeral runtime dirs out of the repo."""
     proc = subprocess.run(
         ["git", "-C", project_root, "init"], capture_output=True, text=True
     )
-    return proc.returncode == 0
+    if proc.returncode != 0:
+        return False
+    ensure_gitignore(project_root)
+    return True
 
 
 # --- interactive shell ----------------------------------------------------

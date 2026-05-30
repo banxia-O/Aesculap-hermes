@@ -80,6 +80,47 @@ def _fake_inputs(monkeypatch, answers):
     monkeypatch.setattr(builtins, "input", lambda *a, **k: next(it))
 
 
+# --- git_init seeds a .gitignore that excludes bulky/ephemeral runtime dirs --
+
+def test_ensure_gitignore_creates_block(tmp_path):
+    from aesculap.install.wizard import ensure_gitignore
+
+    ensure_gitignore(str(tmp_path))
+    body = (tmp_path / ".gitignore").read_text()
+    for excl in ("logs/", "sessions/", "cron/output/", "image_cache/"):
+        assert excl in body
+
+
+def test_ensure_gitignore_idempotent(tmp_path):
+    from aesculap.install.wizard import ensure_gitignore
+
+    ensure_gitignore(str(tmp_path))
+    first = (tmp_path / ".gitignore").read_text()
+    ensure_gitignore(str(tmp_path))
+    assert (tmp_path / ".gitignore").read_text() == first  # no duplicate block
+
+
+def test_ensure_gitignore_preserves_existing(tmp_path):
+    from aesculap.install.wizard import ensure_gitignore
+
+    gi = tmp_path / ".gitignore"
+    gi.write_text("*.pyc\n")
+    ensure_gitignore(str(tmp_path))
+    body = gi.read_text()
+    assert body.startswith("*.pyc\n")   # user content untouched
+    assert "logs/" in body              # our block appended
+
+
+def test_git_init_seeds_gitignore(tmp_path):
+    from aesculap.install.wizard import git_init
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert git_init(str(repo))
+    assert (repo / ".gitignore").exists()
+    assert "image_cache/" in (repo / ".gitignore").read_text()
+
+
 def test_run_wizard_tier_c_aborts_on_no(monkeypatch, tmp_path):
     from aesculap.install import wizard
     # project, hermes cfg, tier=C, "dedicated?" -> no  => abort with code 1
