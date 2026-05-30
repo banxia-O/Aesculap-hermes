@@ -69,6 +69,27 @@ def test_shell_metachar_commands_fire(gate, command):
     assert hits, f"expected metachar tripwire for {command!r}"
 
 
+@pytest.mark.parametrize("command", [
+    "truncate -s0 /etc/hostname",       # writes a system path
+    "cat /root/.ssh/id_rsa",            # reads an ssh key
+    "cp x /home/h/.hermes/.env",        # touches a credential path
+    "tee --output=/etc/cron.d/x",       # path after --opt=
+])
+def test_command_path_argument_vetted_against_floor(gate, command):
+    """#2: a non-forbidden binary must not name a §9.2-blacklisted absolute
+    path, even though argv-token matching wouldn't otherwise flag it."""
+    tg, _ = gate
+    hits = tg.scan([act_cmd(command)])
+    assert hits, f"expected path-floor tripwire for {command!r}"
+
+
+def test_command_with_no_absolute_path_not_floored(gate):
+    """A command with only relative args isn't path-floored (gate's §6.2 still
+    escalates any self_fix RUN_COMMAND separately)."""
+    tg, _ = gate
+    assert tg.scan([act_cmd("python app.py --flag value")]) == []
+
+
 def test_benign_command_passes(gate):
     tg, _ = gate
     assert tg.scan([act_cmd("systemctl restart hermes")]) == []

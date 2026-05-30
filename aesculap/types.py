@@ -86,6 +86,11 @@ class ProposedAction:
     kind: ActionKind
     path: str | None = None
     command: str | None = None
+    # For WRITE_FILE: the exact new file content, written directly to `path` by
+    # the executor (no shell). self_fix performs file edits this way — never by
+    # running a shell command — so the blast radius is a single, scope-checked,
+    # backed-up file (§6.2) and there is no command-injection surface (§8.1).
+    content: str | None = None
     description: str = ""
 
 
@@ -104,7 +109,12 @@ class TriageDecision:
     route: Route
     needs_human_reason: NeedsHumanReason = NeedsHumanReason.NONE
     confidence: float = 0.0
-    actions: list[str] = field(default_factory=list)
+    # Each item is either free text (lowered heuristically into a RESTART or a
+    # RUN_COMMAND) or a structured object, e.g.
+    #   {"kind": "write_file", "path": "...", "content": "..."}
+    # The structured form is how the LLM proposes a scope-checked, shell-free
+    # single-file edit that self_fix is allowed to perform (§6.2).
+    actions: list = field(default_factory=list)
 
 
 @dataclass

@@ -47,15 +47,40 @@ class PipelineOutcome:
     triage_degraded: bool
 
 
-# Heuristic lowering of free-text actions into structured ProposedActions for
-# the gate. This is intentionally conservative: an action we cannot confidently
-# classify becomes a RUN_COMMAND with the raw text, which the tripwire scanner
-# inspects; a restart phrase becomes RESTART_PROCESS. The gate fails closed, so
-# mis-lowering errs toward escalation, never toward unsafe execution.
-def lower_actions(actions: list[str]) -> list[ProposedAction]:
+# Lowering of triage action items into structured ProposedActions for the gate.
+# Structured objects (e.g. write_file with path+content) are passed through with
+# their kind intact; free text is classified conservatively — a restart phrase
+# becomes RESTART_PROCESS, anything else becomes a RUN_COMMAND with the raw text
+# so the command-shaped tripwires inspect it. The gate fails closed, so
+# mis-lowering errs toward escalation, never toward unsafe execution. (Note: a
+# RUN_COMMAND in a self_fix proposal is escalated off self_fix by §6.2 — its
+# blast radius is unbounded — so file edits must come as write_file objects.)
+def lower_actions(actions: list) -> list[ProposedAction]:
     lowered: list[ProposedAction] = []
-    for text in actions:
-        t = text.strip()
+    for item in actions:
+        # Structured action object (from the triage schema): already classified.
+        if isinstance(item, dict):
+            kind = item.get("kind")
+            if kind == "write_file":
+                lowered.append(ProposedAction(
+                    kind=ActionKind.WRITE_FILE,
+                    path=item.get("path"),
+                    content=item.get("content", ""),
+                    description=f"write {item.get('path')}",
+                ))
+            elif kind == "restart":
+                lowered.append(ProposedAction(
+                    kind=ActionKind.RESTART_PROCESS,
+                    command=item.get("target") or None,
+                    description=item.get("target") or "restart",
+                ))
+            elif kind == "run_command":
+                cmd = item.get("command", "")
+                lowered.append(ProposedAction(
+                    kind=ActionKind.RUN_COMMAND, command=cmd, description=cmd))
+            continue
+        # Free-text action: heuristic lowering.
+        t = str(item).strip()
         low = t.lower()
         if not t:
             continue

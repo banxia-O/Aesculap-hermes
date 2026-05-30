@@ -65,6 +65,15 @@ def test_credential_patterns_blacklisted(tmp_path, project, name):
     assert not gate.check_write(str(project / name)).allowed
 
 
+@pytest.mark.parametrize("name", [".ENV", "ID_RSA", "Credentials",
+                                  "Server.KEY", "id_ed25519", ".Git-Credentials"])
+def test_credential_patterns_case_insensitive(tmp_path, project, name):
+    """#4: fnmatch is case-sensitive on Linux; uppercase variants of credential
+    filenames must still be floored (§9.2)."""
+    gate = make_gate(tmp_path, project)
+    assert not gate.check_write(str(project / name)).allowed
+
+
 def test_identity_file_blacklisted(tmp_path, project):
     soul = project / "SOUL.md"
     soul.write_text("persona\n")

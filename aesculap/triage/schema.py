@@ -80,6 +80,38 @@ def _extract_json(text: str) -> str | None:
     return None
 
 
+def _parse_actions(raw: list) -> tuple[list, str | None]:
+    """Normalize triage action items (decision #3: illegal shape -> human).
+
+    Accepts plain strings (free-text, lowered heuristically downstream) and
+    structured objects. The only structured kind that unlocks a self_fix-eligible
+    file edit is ``write_file`` with a string ``path`` and string ``content`` —
+    executed by a direct, scope-checked, shell-free write (§6.2/§8.1).
+    """
+    out: list = []
+    for a in raw:
+        if isinstance(a, str):
+            out.append(a)
+            continue
+        if not isinstance(a, dict):
+            return [], f"action must be a string or object, got {type(a).__name__}"
+        kind = str(a.get("kind", "")).lower()
+        if kind == "write_file":
+            path, content = a.get("path"), a.get("content")
+            if not isinstance(path, str) or not path:
+                return [], "write_file action requires a non-empty string `path`"
+            if not isinstance(content, str):
+                return [], "write_file action requires a string `content`"
+            out.append({"kind": "write_file", "path": path, "content": content})
+        elif kind in ("restart", "restart_process"):
+            out.append({"kind": "restart", "target": str(a.get("target", ""))})
+        elif kind in ("run_command", "command"):
+            out.append({"kind": "run_command", "command": str(a.get("command", ""))})
+        else:
+            return [], f"unknown structured action kind: {kind!r}"
+    return out, None
+
+
 def parse_triage(text: str) -> ParseOutcome:
     """Parse + strictly validate triage JSON; degrade to human on any fault."""
     blob = _extract_json(text)
@@ -133,10 +165,12 @@ def parse_triage(text: str) -> ParseOutcome:
     except (TypeError, ValueError):
         confidence = 0.0
 
-    actions = data.get("actions", [])
-    if not isinstance(actions, list):
+    raw_actions = data.get("actions", [])
+    if not isinstance(raw_actions, list):
         return _human_fallback("actions must be a list")
-    actions = [str(a) for a in actions]
+    actions, bad = _parse_actions(raw_actions)
+    if bad is not None:
+        return _human_fallback(bad)
 
     diagnosis = str(data.get("diagnosis", "")).strip()
 

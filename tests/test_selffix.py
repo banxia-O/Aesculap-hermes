@@ -141,12 +141,43 @@ def test_file_backup_restored_on_verify_failure(tmp_path):
     before = [res("proc", ProbeStatus.FAIL)]
     ex, suite = make_executor([[res("proc", ProbeStatus.FAIL)]], tmp_path)
 
-    def edit(action):
-        conf.write_text("edited")
-        return ok_proc()
-
-    ex.command_fn = edit
+    # WRITE_FILE writes its content directly (no shell); verify then fails, so
+    # the original content must be restored.
     action = [ProposedAction(kind=ActionKind.WRITE_FILE, path=str(conf),
-                             command="edit")]
+                             content="edited")]
     ex.run(action, before, EscalationState())
     assert conf.read_text() == "orig"  # rolled back
+
+
+def test_write_file_applies_content_without_shell(tmp_path):
+    conf = tmp_path / "c.json"
+    conf.write_text("orig")
+    before = [res("proc", ProbeStatus.FAIL)]
+    # verify passes (proc OK after the write)
+    ex, suite = make_executor([[res("proc", ProbeStatus.OK)]], tmp_path)
+    action = [ProposedAction(kind=ActionKind.WRITE_FILE, path=str(conf),
+                             content="fixed: true\n")]
+    result = ex.run(action, before, EscalationState())
+    assert result.success
+    assert conf.read_text() == "fixed: true\n"
+
+
+def test_write_file_refused_outside_scope(tmp_path):
+    """When a ScopeGate is wired, a write outside scope is refused at execution
+    (defense-in-depth) and does not touch the target."""
+    from aesculap.config import ScopeConfig
+    from aesculap.gate.scope import ScopeGate
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    scope = ScopeGate(ScopeConfig(tier="A", project_root=str(project)))
+    before = [res("proc", ProbeStatus.FAIL)]
+    ex, suite = make_executor([[res("proc", ProbeStatus.FAIL)]], tmp_path)
+    ex.scope = scope
+
+    target = tmp_path / "outside.txt"  # outside the project tree
+    action = [ProposedAction(kind=ActionKind.WRITE_FILE, path=str(target),
+                             content="x")]
+    result = ex.run(action, before, EscalationState())
+    assert not result.success
+    assert not target.exists()

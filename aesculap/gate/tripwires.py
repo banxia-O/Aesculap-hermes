@@ -84,6 +84,24 @@ def _command_argv(command: str) -> list[str]:
         return [command]
 
 
+def _path_like_tokens(argv: list[str]) -> list[str]:
+    """Absolute path-shaped tokens in an argv (for §9.2 floor vetting, #2).
+
+    We only vet *absolute* paths (``/...`` or ``~...``), optionally the value
+    after ``--opt=``: relative paths resolve against an ambiguous working dir, so
+    judging them invites false negatives/positives. Absolute paths are the clear
+    danger (e.g. ``truncate -s0 /etc/hostname``). A token naming a system binary
+    (``/usr/bin/python``) will also match — an accepted conservative trade-off:
+    a hit routes to a human, never to silent execution.
+    """
+    out: list[str] = []
+    for tok in argv:
+        cand = tok.split("=", 1)[1] if tok.startswith("--") and "=" in tok else tok
+        if cand.startswith("/") or cand.startswith("~"):
+            out.append(cand)
+    return out
+
+
 def _check_command(command: str) -> str | None:
     """Return a tripwire reason if a shell command is forbidden, else None."""
     if not command:
@@ -134,6 +152,13 @@ class TripwireGate:
             reason = _check_command(action.command or "")
             if reason is not None:
                 return reason
+            # #2: vet absolute path arguments against the §9.2 blacklist floor,
+            # so a non-forbidden binary can't reach a blacklisted path (e.g.
+            # `truncate -s0 /etc/hostname`, `cat /root/.ssh/id_rsa`).
+            for tok in _path_like_tokens(_command_argv(action.command or "")):
+                floor = self.scope.blacklist_floor(tok)
+                if floor is not None:
+                    return f"tripwire: command path argument {tok!r} -> {floor}"
         return None
 
     def scan(self, actions: list[ProposedAction]) -> list[TripwireHit]:

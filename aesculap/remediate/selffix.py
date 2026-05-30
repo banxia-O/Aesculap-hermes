@@ -24,9 +24,11 @@ from __future__ import annotations
 import shlex
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from aesculap.gate.escalation import EscalationLadder, EscalationState
+from aesculap.gate.scope import ScopeGate
 from aesculap.remediate.backup import FileBackup, FileBackupManager
 from aesculap.remediate.verify import VerifyResult, Verifier
 from aesculap.probes.base import ProbeResult
@@ -83,12 +85,16 @@ class SelfFixExecutor:
         command_fn: CommandFn | None = None,
         observe_window_seconds: float = 60,
         sleep_fn: Callable[[float], None] | None = None,
+        scope: ScopeGate | None = None,
     ):
         self.verifier = verifier
         self.backup_mgr = backup_mgr
         self.ladder = ladder
         self.restart_fn = restart_fn or _default_restart
         self.command_fn = command_fn or _default_command
+        # Optional defense-in-depth: re-check write targets against scope at
+        # execution time. The gate already vetted them before routing here.
+        self.scope = scope
         self.observe_window_seconds = observe_window_seconds
         # Injected so tests don't actually sleep through the observation window.
         import time as _time
@@ -100,12 +106,29 @@ class SelfFixExecutor:
         """Run actions; return (ok, reason, backups_for_rollback)."""
         backups: list[FileBackup] = []
         for action in actions:
-            if action.kind == ActionKind.WRITE_FILE and action.path:
+            # WRITE_FILE: write the provided content directly — no shell, no
+            # command. The path is backed up first and (defense-in-depth)
+            # re-checked against scope before we touch it.
+            if action.kind == ActionKind.WRITE_FILE:
+                if not action.path:
+                    return False, "write_file action without path", backups
+                if self.scope is not None:
+                    verdict = self.scope.check_write(action.path)
+                    if not verdict.allowed:
+                        return False, f"refused write: {verdict.reason}", backups
                 backups.append(self.backup_mgr.backup(action.path))
+                try:
+                    Path(action.path).write_text(action.content or "")
+                except OSError as e:
+                    return False, f"write failed: {e}", backups
+                continue
             try:
                 if action.kind == ActionKind.RESTART_PROCESS:
                     proc = self.restart_fn(action)
-                elif action.kind in (ActionKind.RUN_COMMAND, ActionKind.WRITE_FILE):
+                elif action.kind == ActionKind.RUN_COMMAND:
+                    # Reachable only if a caller bypasses the gate; the §6.2 gate
+                    # escalates any self_fix RUN_COMMAND off this path. Kept
+                    # shell-free for safety.
                     proc = self.command_fn(action)
                 else:
                     continue

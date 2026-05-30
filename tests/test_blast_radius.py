@@ -83,6 +83,30 @@ def test_self_fix_forbidden_radius_to_human_when_no_agent(tmp_path):
     assert d.final_route is Route.HUMAN
 
 
+def test_self_fix_run_command_escalates_even_when_benign(gate):
+    """#5/§6.2: an arbitrary command has unbounded blast radius, so self_fix may
+    never run one — even a benign, single-file, reversible command escalates to
+    coding_agent. File edits must come as write_file actions instead."""
+    g, _ = gate
+    actions = [ProposedAction(ActionKind.RUN_COMMAND,
+                              command="sed -i s/a/b/ app.cfg")]
+    d = g.decide(triage(Route.SELF_FIX, BlastRadius.SINGLE_FILE, reversible=True),
+                 actions)
+    assert d.final_route is Route.CODING_AGENT
+    assert d.overridden
+    assert any("shell command" in r for r in d.reasons)
+
+
+def test_self_fix_write_file_with_content_allowed(gate):
+    """The shell-free write_file path stays self_fix-eligible."""
+    g, project = gate
+    actions = [ProposedAction(ActionKind.WRITE_FILE, path=str(project / "a.cfg"),
+                              content="key: value\n")]
+    d = g.decide(triage(Route.SELF_FIX, BlastRadius.SINGLE_FILE), actions)
+    assert d.final_route is Route.SELF_FIX
+    assert not d.overridden
+
+
 def test_tripwire_beats_self_fix_even_single_file(gate):
     """Adversarial: LLM says self_fix / single_file / reversible, but the
     action is `rm -rf`. Tripwire must force human."""
